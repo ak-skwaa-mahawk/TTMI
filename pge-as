@@ -1,0 +1,168 @@
+//! pge-as: Hardened Polylinguistic Dene Engine Assembler
+
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::Path;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AsmError {
+    EmptyInstruction,
+    MalformedStructure(String),
+    InvalidVectorPrefix(String),
+    InvalidAspectPrefix(String),
+    InvalidEvidentiality(String),
+    InvalidVerbStem(String),
+    InvalidPayload(String),
+    Io(String),
+}
+
+pub struct Assembler;
+
+impl Assembler {
+    /// Compiles a single verb complex into a packed 64-bit PIW word.
+    /// Handles semicolons, comments (`!` or `#`), signed decimals, and signed hex literals.
+    pub fn assemble_line(line: &str) -> Result<u64, AsmError> {
+        // Strip comments first
+        let uncommented = match line.find(|c| c == '!' || c == '#') {
+            Some(idx) => &line[..idx],
+            None => line,
+        };
+
+        // Strip semicolons and surrounding whitespace
+        let trimmed = uncommented.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() {
+            return Err(AsmError::EmptyInstruction);
+        }
+
+        // Split payload specifier if present
+        let (core_complex, payload_val) = if let Some(open_paren) = trimmed.find('(') {
+            let close_paren = trimmed.rfind(')').ok_or_else(|| {
+                AsmError::MalformedStructure(format!("Missing closing parenthesis in: {}", trimmed))
+            })?;
+            let payload_str = trimmed[open_paren + 1..close_paren].trim();
+            let parsed_payload = Self::parse_payload(payload_str)?;
+            (&trimmed[..open_paren], parsed_payload)
+        } else {
+            (trimmed, 0i16)
+        };
+
+        // Deconstruct verbal complex components: vector-aspect-evidential-stem
+        let tokens: Vec<&str> = core_complex.split('-').collect();
+        if tokens.len() != 4 {
+            return Err(AsmError::MalformedStructure(format!(
+                "Expected 4 hyphenated morphemes, found {}: {:?}",
+                tokens.len(),
+                core_complex
+            )));
+        }
+
+        let vector = Self::parse_vector(tokens[0])?;
+        let aspect = Self::parse_aspect(tokens[1])?;
+        let evid   = Self::parse_evidentiality(tokens[2])?;
+        let stem   = Self::parse_stem(tokens[3])?;
+
+        // Format: [63:56] STEM | [55:48] ASPECT | [47:40] EVID | [39:32] VEC | [31:16] ACC (0) | [15:0] PAYLOAD
+        let piw = ((stem as u64) << 56)
+            | ((aspect as u64) << 48)
+            | ((evid as u64) << 40)
+            | ((vector as u64) << 32)
+            | ((payload_val as u16 as u64) & 0xFFFF);
+
+        Ok(piw)
+    }
+
+    fn parse_vector(prefix: &str) -> Result<u8, AsmError> {
+        match prefix {
+            "zhit"   => Ok(0x00), // CurrentPos
+            "nìi"    => Ok(0x01), // Downstream
+            "dàa"    => Ok(0x02), // Upstream
+            "tth'ak" => Ok(0x03), // Transverse
+            _ => Err(AsmError::InvalidVectorPrefix(prefix.to_string())),
+        }
+    }
+
+    fn parse_aspect(prefix: &str) -> Result<u8, AsmError> {
+        match prefix {
+            "ii" => Ok(0x01), // Imperfective
+            "dh" => Ok(0x02), // Perfective
+            "ga" => Ok(0x03), // Iterative
+            _ => Err(AsmError::InvalidAspectPrefix(prefix.to_string())),
+        }
+    }
+
+    fn parse_evidentiality(tag: &str) -> Result<u8, AsmError> {
+        match tag {
+            "t'ee" => Ok(0x00), // DirectObserved
+            "k'ìt" => Ok(0x01), // Inferred
+            "yah"  => Ok(0x02), // Reported
+            _ => Err(AsmError::InvalidEvidentiality(tag.to_string())),
+        }
+    }
+
+    fn parse_stem(root: &str) -> Result<u8, AsmError> {
+        match root {
+            "tł'oo" => Ok(0x01), // TRANSVECT
+            "ch'àa" => Ok(0x02), // FUSE
+            "k'ee"  => Ok(0x03), // TRANSFORM
+            "nèh"   => Ok(0x04), // VALIDATE
+            "zhìt"  => Ok(0x05), // COMMIT
+            _ => Err(AsmError::InvalidVerbStem(root.to_string())),
+        }
+    }
+
+    fn parse_payload(val: &str) -> Result<i16, AsmError> {
+        let (is_negative, raw_digits) = if let Some(rest) = val.strip_prefix('-') {
+            (true, rest.trim())
+        } else if let Some(rest) = val.strip_prefix('+') {
+            (false, rest.trim())
+        } else {
+            (false, val.trim())
+        };
+
+        let magnitude: i32 = if let Some(hex_part) = raw_digits.strip_prefix("0x").or_else(|| raw_digits.strip_prefix("0X")) {
+            i32::from_str_radix(hex_part, 16)
+                .map_err(|_| AsmError::InvalidPayload(val.to_string()))?
+        } else {
+            raw_digits.parse::<i32>()
+                .map_err(|_| AsmError::InvalidPayload(val.to_string()))?
+        };
+
+        let signed_val = if is_negative { -magnitude } else { magnitude };
+
+        if signed_val < i16::MIN as i32 || signed_val > i16::MAX as i32 {
+            return Err(AsmError::InvalidPayload(format!(
+                "Payload {} out of 16-bit range",
+                val
+            )));
+        }
+
+        Ok(signed_val as i16)
+    }
+
+    /// Assembles an entire source file and emits a hex ROM file formatted for Verilog $readmemh.
+    pub fn assemble_file<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<usize, AsmError> {
+        let in_file = File::open(&input_path).map_err(|e| AsmError::Io(e.to_string()))?;
+        let reader = BufReader::new(in_file);
+        let mut out_file = File::create(&output_path).map_err(|e| AsmError::Io(e.to_string()))?;
+
+        let mut count = 0;
+        for (line_no, line_res) in reader.lines().enumerate() {
+            let raw_line = line_res.map_err(|e| AsmError::Io(e.to_string()))?;
+            match Self::assemble_line(&raw_line) {
+                Ok(piw) => {
+                    writeln!(out_file, "{:016x}", piw).map_err(|e| AsmError::Io(e.to_string()))?;
+                    count += 1;
+                }
+                Err(AsmError::EmptyInstruction) => continue,
+                Err(e) => {
+                    return Err(AsmError::MalformedStructure(format!(
+                        "Error on line {}: {:?}",
+                        line_no + 1,
+                        e
+                    )));
+                }
+            }
+        }
+        Ok(count)
+    }
+}
