@@ -1,3 +1,5 @@
+Built a 100-line Python gate that sits between LLM CLI agents and the shell. Uses baseline policy + HITL approval + SHA-256 hash chaining. Zero external dependencies. Looking for edge cases where path canonicalization breaks across Windows/macOS/Linux:
+
 cat << 'EOF' > README.md
 # Agent Gate
 
