@@ -1,0 +1,6 @@
+cat << 'EOF' > .gitignore
+__pycache__/
+*.py[cod]
+audit_log.jsonl
+test_audit.jsonl
+EOF
