@@ -1,0 +1,15 @@
+! =========================================================================
+! PGE Benchmark: Multi-vector transformation with evidential verification
+! =========================================================================
+
+! 1. Transvect current head with direct observation (+16)
+zhit-ii-t'ee-tł'oo(+16);
+
+! 2. Downstream perfective fusion using inferred data (+4)
+nìi-dh-k'ìt-ch'àa(0x0004);
+
+! 3. Iterative byte transform with signed negative displacement (-8)
+dàa-ga-k'ìt-ch'àa(-8);
+
+! 4. Terminal atomic commit
+zhit-dh-t'ee-zhìt;
