@@ -1,0 +1,112 @@
+`timescale 1ns / 1ps
+
+module pge_rom_testbench;
+
+    reg         clk;
+    reg         rst_n;
+    reg  [63:0] piw_instruction;
+    reg         piw_valid;
+    wire        piw_ready;
+    reg         trap_ack;
+    reg  [7:0]  cfg_trust_ceiling;
+    reg  [31:0] stream_in_data;
+    reg         stream_in_valid;
+    wire [31:0] pipeline_out_data;
+    wire        pipeline_out_valid;
+    wire        evidentiality_fault;
+
+    reg [63:0] instruction_rom [0:255];
+    integer pc;
+    integer committed_count;
+
+    pge_pipeline_core dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .piw_instruction(piw_instruction),
+        .piw_valid(piw_valid),
+        .piw_ready(piw_ready),
+        .trap_ack(trap_ack),
+        .cfg_trust_ceiling(cfg_trust_ceiling),
+        .stream_in_data(stream_in_data),
+        .stream_in_valid(stream_in_valid),
+        .pipeline_out_data(pipeline_out_data),
+        .pipeline_out_valid(pipeline_out_valid),
+        .evidentiality_fault(evidentiality_fault)
+    );
+
+    always #5 clk = ~clk;
+
+    initial begin
+        clk = 0;
+        rst_n = 0;
+        piw_valid = 0;
+        trap_ack = 0;
+        stream_in_valid = 0;
+        cfg_trust_ceiling = 8'h01; // Trust ceiling: INFERRED
+        pc = 0;
+        committed_count = 0;
+
+        for (integer i = 0; i < 256; i = i + 1) begin
+            instruction_rom[i] = 64'd0;
+        end
+
+        $readmemh("program.hex", instruction_rom);
+
+        #20;
+        rst_n = 1;
+        #10;
+
+        // Seed initial circular stream: [10, 20, 30, 40]
+        @(posedge clk);
+        stream_in_data = 32'd10; stream_in_valid = 1; @(posedge clk);
+        stream_in_data = 32'd20; stream_in_valid = 1; @(posedge clk);
+        stream_in_data = 32'd30; stream_in_valid = 1; @(posedge clk);
+        stream_in_data = 32'd40; stream_in_valid = 1; @(posedge clk);
+        stream_in_valid = 0;
+
+        // Dispatch loop bounded by explicit handshake
+        while (instruction_rom[pc] !== 64'd0 && pc < 256) begin
+            @(posedge clk);
+            #1;
+
+            if (evidentiality_fault) begin
+                $display("[T=%0t] SECURITY FAULT: Evidentiality ceiling breach at PC=%0d. Tripping trap_ack.", $time, pc - 1);
+                piw_valid = 1'b0;
+                trap_ack  = 1'b1;
+                @(posedge clk);
+                #1;
+                trap_ack  = 1'b0;
+                // pc already points to next sequential micro-op; do not increment again
+            end else if (piw_ready) begin
+                piw_instruction = instruction_rom[pc];
+                piw_valid       = 1'b1;
+                pc              = pc + 1;
+            end
+
+            if (pipeline_out_valid) begin
+                committed_count = committed_count + 1;
+                $display("[T=%0t] RETIREMENT: Commit #%0d -> Output: %d (0x%08x)", 
+                         $time, committed_count, pipeline_out_data, pipeline_out_data);
+            end
+        end
+
+        @(posedge clk);
+        #1;
+        piw_valid = 1'b0;
+
+        // Drain 2-stage execution latency (OF -> EX)
+        repeat (5) begin
+            @(posedge clk);
+            #1;
+            if (pipeline_out_valid) begin
+                committed_count = committed_count + 1;
+                $display("[T=%0t] RETIREMENT (DRAIN): Commit #%0d -> Output: %d (0x%08x)", 
+                         $time, committed_count, pipeline_out_data, pipeline_out_data);
+            end
+        end
+
+        $display("=== Program Run Complete. Instructions executed: %0d, Outputs committed: %0d ===", pc, committed_count);
+        $finish;
+    end
+
+endmodule
